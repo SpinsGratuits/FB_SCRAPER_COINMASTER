@@ -4,18 +4,13 @@ import re
 from datetime import datetime, timedelta
 import cloudscraper
 from bs4 import BeautifulSoup
-#import firebase_admin
-#from firebase_admin import credentials, firestore
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # --- 1. CONFIGURATION ---
-url = "https://facebook.com/coinmaster/"
+# Utilisation d'une passerelle de scraping Facebook vers JSON résiliente
+url = "https://rsshub.app"
 filename = "scrapcoinmaster.json"
-
-mois_en_to_num = {
-    "january": "01", "januray": "01", "february": "02", "february ": "02", "march": "03", 
-    "april": "04", "may": "05", "june": "06", "july": "07", "august": "08", 
-    "september": "09", "october": "10", "november": "11", "december": "12"
-}
 
 now = datetime.now()
 date_now_str = now.strftime("%d/%m/%Y @ %H:%M")
@@ -23,16 +18,16 @@ heure_actuelle_str = now.strftime("%H:%M")
 limite_conservation = now - timedelta(days=5)
 
 # --- 1B. INITIALISATION FIREBASE ---
-#firebase_key_raw = os.environ.get('FIREBASE_KEY')
-#if not firebase_key_raw:
-#    raise ValueError("Le secret FIREBASE_KEY est introuvable dans l'environnement.")
+firebase_key_raw = os.environ.get('FIREBASE_KEY')
+if not firebase_key_raw:
+    raise ValueError("Le secret FIREBASE_KEY est introuvable dans l'environnement.")
 
-#if not firebase_admin._apps:
-#    cred_json = json.loads(firebase_key_raw)
-#    cred = credentials.Certificate(cred_json)
-#    firebase_admin.initialize_app(cred)
+if not firebase_admin._apps:
+    cred_json = json.loads(firebase_key_raw)
+    cred = credentials.Certificate(cred_json)
+    firebase_admin.initialize_app(cred)
 
-# db = firestore.client()
+db = firestore.client()
 
 # --- 2. CHARGEMENT & NETTOYAGE DE L'HISTORIQUE ---
 anciens_liens = {}
@@ -52,69 +47,66 @@ if os.path.exists(filename):
     except Exception as e:
         print(f"[Attention] Impossible de lire l'historique JSON : {e}")
 
+# --- 3. REQUÊTE RÉSEAU ---
 scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
 
 try:
     response = scraper.get(url, timeout=15)
     status_code = response.status_code
-    html_text = response.text
+    posts_data = response.json() if status_code == 200 else {}
 except Exception as e:
     status_code = 500
-    html_text = ""
-    print(f"[Erreur] Connexion impossible : {e}")
+    posts_data = {}
+    print(f"[Erreur] Connexion impossible à la passerelle Facebook : {e}")
 
-if status_code == 200:
-    soup = BeautifulSoup(html_text, "html.parser")
+# --- 4. PARSING DES POSTS FACEBOOK ---
+if status_code == 200 and "items" in posts_data:
     json_data = []
     liens_visites_session = set()
     nouveaux_liens_detectes = 0  
     
-    entry_content = soup.find(class_="entry-content")
-    if not entry_content:
-        entry_content = soup
-        
     current_date_str = now.strftime("%d/%m/%Y")
     
-    for element in entry_content.find_all(["p", "ul", "ol", "strong"]):
-        text = element.get_text().strip().lower()
+    # On parcourt les derniers posts publiés sur la page officielle
+    for post in posts_data.get("items", []):
+        html_content = post.get("content_html", "")
+        soup_post = BeautifulSoup(html_content, "html.parser")
         
-        match_date = re.search(r'(\d{1,2})\s+([a-z]+)\s+(\d{4})', text)
-        if match_date:
-            jour = match_date.group(1).zfill(2)
-            nom_mois = match_date.group(2).strip()
-            annee = match_date.group(3)
-            
-            num_mois = mois_en_to_num.get(nom_mois, "01")
-            current_date_str = f"{jour}/{num_mois}/{annee}"
-            continue  
-
-       # 🟢 AJOUT : On vérifie si la date de la section actuelle est trop vieille (inférieure à limite_conservation)
+        # Récupération de la date de publication du post Facebook (Format ISO)
+        date_pub_iso = post.get("date_published", "")
         try:
-            date_section = datetime.strptime(current_date_str, "%d/%m/%Y")
-            # Si la date lue sur le site est plus vieille que notre limite, on ignore tous ses liens
-            if date_section < limite_conservation:
+            # Nettoyage rudimentaire du fuseau horaire Z pour compatibilité Python
+            date_claire = date_pub_iso.split("T")[0] # YYYY-MM-DD
+            date_objet = datetime.strptime(date_claire, "%Y-%m-%d")
+            
+            if date_objet < limite_conservation:
                 continue
-        except:
-            pass
+            current_date_str = date_objet.strftime("%d/%m/%Y")
+        except Exception as e:
+            current_date_str = now.strftime("%d/%m/%Y")
         
-        links = element.find_all("a", href=True)
+        # Extraction des liens présents dans le texte du post Facebook
+        links = soup_post.find_all("a", href=True)
         for link in links:
             href = link["href"].strip()
             
+            # Vos filtres stricts d'exclusion
             if href.startswith("/") or "t.me" in href.lower() or "telegram.me" in href.lower():
                 continue
-            if any(p in href.lower() for p in ["twitter.com", "facebook.com", "whatsapp", "pinterest", "reddit.com"]):
+            if any(p in href.lower() for p in ["twitter.com", "facebook.com", "whatsapp", "pinterest", "reddit.com", "instagram.com"]):
                 continue
                 
-            keywords = ["coinmaster", "static-mat", "t.co", "bit.ly", "moonactive", "d10xl"]
+            # Les signatures des liens de récompenses distribués par Moon Active
+            keywords = ["coinmaster", "static-mat", "t.co", "bit.ly", "moonactive", "getcoinmaster"]
             if any(key in href.lower() for key in keywords):
                 
                 if href in liens_visites_session:
                     continue
                 liens_visites_session.add(href)
                 
-                type_recompense = "Spins et Coins"
+                type_recompense = "Spins et Coins (Facebook Officiel)"
                 
+                # --- 5. COMPARAISON ET ATTRIBUTION DES BADGES ---
                 if href in anciens_liens:
                     date_premier_scraping_str = anciens_liens[href].get("date_scraping", date_now_str)
                     badge_actuel = ""
@@ -136,7 +128,6 @@ if status_code == 200:
                         "badge": badge_actuel
                     })
                 else:
-                    # Ici, plus aucun blocage de date. Si le lien n'est pas dans le JSON, c'est un NOUVEAU !
                     nouveaux_liens_detectes += 1
                     date_scraping1_combinee = f"{current_date_str} @ {heure_actuelle_str}"
                     json_data.append({
@@ -152,6 +143,7 @@ if status_code == 200:
     if not json_data and anciens_liens:
         json_data = list(anciens_liens.values())
 
+    # Tri par date décroissante
     def extraire_cle_parution(item):
         try:
             return datetime.strptime(item.get("date", ""), "%d/%m/%Y").timestamp()
@@ -160,38 +152,39 @@ if status_code == 200:
 
     json_data.sort(key=extraire_cle_parution, reverse=True)
 
+    # Sauvegarde locale du fichier de test
     with open(filename, mode="w", encoding="utf-8") as json_file:
         json.dump(json_data, json_file, indent=4, ensure_ascii=False)
         
-    print(f"[Terminé] Fichier Coin Master {filename} mis à jour ({len(json_data)} liens valides).")
-    print(f"[Diagnostic] Nombre de nouveaux liens détectés : {nouveaux_liens_detectes}")
+    print(f"[Terminé] Fichier Coin Master FB {filename} mis à jour ({len(json_data)} liens valides).")
+    print(f"[Diagnostic] Nouveaux liens Facebook détectés : {nouveaux_liens_detectes}")
 
-    # --- 7. EXPORTATION NOTIFICATION & ENVOI PUSH DIRECT ---
-#    if nouveaux_liens_detectes > 0:
- #       try:
- #           from firebase_admin import messaging
- #           
-#            db.collection("notifications").add({
-#                "title": "🐷 Coin Reward ! 🎁",
-#                "body": "New free spins have just been added !",
-#                "nom_du_jeu": "coin_master",
-#                "created_at": firestore.SERVER_TIMESTAMP
-#            })
-  #          print("[Firebase] Enregistrement d'historique créé pour Coin Master.")
-#
-#            message = messaging.Message(
-#                notification=messaging.Notification(
-#                    title="🐷 Coin Reward ! 🎁",
-#                    body="New free spins have just been added !"
-#                ),
-#                topic="coin_master"
-#            )
-#            
-#            response = messaging.send(message)
-#            print(f"[Firebase Push] Notification Coin Master propulsée avec succès ! (ID: {response})")
-#            
-#        except Exception as e:
-#            print(f"[Firebase] [Erreur] Impossible d'envoyer l'alerte push direct Coin Master : {e}")
-#            
+    # --- 6. EXPORTATION NOTIFICATION & ENVOI PUSH DIRECT ---
+    if nouveaux_liens_detectes > 0:
+        try:
+            from firebase_admin import messaging
+            
+            db.collection("notifications").add({
+                "title": "🐷 Facebook Coin Reward ! 🎁",
+                "body": "Des spins officiels viennent d'être publiés sur Facebook !",
+                "nom_du_jeu": "coin_master",
+                "created_at": firestore.SERVER_TIMESTAMP
+            })
+            print("[Firebase] Enregistrement d'historique créé pour Coin Master FB.")
+
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title="🐷 Facebook Coin Reward ! 🎁",
+                    body="Des spins officiels viennent d'être publiés sur Facebook !"
+                ),
+                topic="coin_master"
+            )
+            
+            response = messaging.send(message)
+            print(f"[Firebase Push] Notification Flash envoyée aux téléphones ! (ID: {response})")
+            
+        except Exception as e:
+            print(f"[Firebase] [Erreur] Échec de l'envoi Push : {e}")
+            
 else:
-    print(f"[Erreur] Échec d'accès réseau (Code {status_code}).")
+    print(f"[Erreur] Échec d'accès réseau ou format JSON Facebook invalide (Code {status_code}).")
