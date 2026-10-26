@@ -4,8 +4,6 @@ import re
 from datetime import datetime, timedelta
 import cloudscraper
 from bs4 import BeautifulSoup
-import firebase_admin
-from firebase_admin import credentials, firestore
 
 # --- 1. CONFIGURATION ---
 # Utilisation d'une passerelle de scraping Facebook vers JSON résiliente
@@ -17,19 +15,7 @@ date_now_str = now.strftime("%d/%m/%Y @ %H:%M")
 heure_actuelle_str = now.strftime("%H:%M")
 limite_conservation = now - timedelta(days=5)
 
-# --- 1B. INITIALISATION FIREBASE ---
-firebase_key_raw = os.environ.get('FIREBASE_KEY')
-if not firebase_key_raw:
-    raise ValueError("Le secret FIREBASE_KEY est introuvable dans l'environnement.")
-
-if not firebase_admin._apps:
-    cred_json = json.loads(firebase_key_raw)
-    cred = credentials.Certificate(cred_json)
-    firebase_admin.initialize_app(cred)
-
-db = firestore.client()
-
-# --- 2. CHARGEMENT & NETTOYAGE DE L'HISTORIQUE ---
+# --- 2. CHARGEMENT & NETTOYAGE DE L'HISTORIQUE LOCAL ---
 anciens_liens = {}
 if os.path.exists(filename):
     try:
@@ -75,8 +61,8 @@ if status_code == 200 and "items" in posts_data:
         # Récupération de la date de publication du post Facebook (Format ISO)
         date_pub_iso = post.get("date_published", "")
         try:
-            # Nettoyage rudimentaire du fuseau horaire Z pour compatibilité Python
-            date_claire = date_pub_iso.split("T")[0] # YYYY-MM-DD
+            # Extraction propre de la partie YYYY-MM-DD
+            date_claire = date_pub_iso.split("T")[0] 
             date_objet = datetime.strptime(date_claire, "%Y-%m-%d")
             
             if date_objet < limite_conservation:
@@ -157,34 +143,7 @@ if status_code == 200 and "items" in posts_data:
         json.dump(json_data, json_file, indent=4, ensure_ascii=False)
         
     print(f"[Terminé] Fichier Coin Master FB {filename} mis à jour ({len(json_data)} liens valides).")
-    print(f"[Diagnostic] Nouveaux liens Facebook détectés : {nouveaux_liens_detectes}")
-
-    # --- 6. EXPORTATION NOTIFICATION & ENVOI PUSH DIRECT ---
-    if nouveaux_liens_detectes > 0:
-        try:
-            from firebase_admin import messaging
-            
-            db.collection("notifications").add({
-                "title": "🐷 Facebook Coin Reward ! 🎁",
-                "body": "Des spins officiels viennent d'être publiés sur Facebook !",
-                "nom_du_jeu": "coin_master",
-                "created_at": firestore.SERVER_TIMESTAMP
-            })
-            print("[Firebase] Enregistrement d'historique créé pour Coin Master FB.")
-
-            message = messaging.Message(
-                notification=messaging.Notification(
-                    title="🐷 Facebook Coin Reward ! 🎁",
-                    body="Des spins officiels viennent d'être publiés sur Facebook !"
-                ),
-                topic="coin_master"
-            )
-            
-            response = messaging.send(message)
-            print(f"[Firebase Push] Notification Flash envoyée aux téléphones ! (ID: {response})")
-            
-        except Exception as e:
-            print(f"[Firebase] [Erreur] Échec de l'envoi Push : {e}")
+    print(f"[Mode Test] Aucun envoi Firebase effectué. Nouveaux liens simulés : {nouveaux_liens_detectes}")
             
 else:
     print(f"[Erreur] Échec d'accès réseau ou format JSON Facebook invalide (Code {status_code}).")
