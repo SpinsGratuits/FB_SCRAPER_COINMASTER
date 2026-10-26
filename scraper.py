@@ -1,96 +1,197 @@
-import time
 import json
 import os
-import requests
-from playwright.sync_api import sync_playwright
+import re
+from datetime import datetime, timedelta
+import cloudscraper
+from bs4 import BeautifulSoup
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-FB_PAGE_URL = "https://facebook.com/coinmaster/"
-JSON_FILE = "scrapcoinmaster.json"
+# --- 1. CONFIGURATION ---
+url = "https://facebook.com/coinmaster/"
+filename = "scrapcoinmaster.json"
 
-# METTEZ VOTRE WEBHOOK DISCORD ICI SI BESOIN
-DISCORD_WEBHOOK_URL = ""
+mois_en_to_num = {
+    "january": "01", "januray": "01", "february": "02", "february ": "02", "march": "03", 
+    "april": "04", "may": "05", "june": "06", "july": "07", "august": "08", 
+    "september": "09", "october": "10", "november": "11", "december": "12"
+}
 
-def load_cached_links():
-    if not os.path.exists(JSON_FILE):
-        return set(), []
+now = datetime.now()
+date_now_str = now.strftime("%d/%m/%Y @ %H:%M")
+heure_actuelle_str = now.strftime("%H:%M")
+limite_conservation = now - timedelta(days=5)
+
+# --- 1B. INITIALISATION FIREBASE ---
+firebase_key_raw = os.environ.get('FIREBASE_KEY')
+if not firebase_key_raw:
+    raise ValueError("Le secret FIREBASE_KEY est introuvable dans l'environnement.")
+
+if not firebase_admin._apps:
+    cred_json = json.loads(firebase_key_raw)
+    cred = credentials.Certificate(cred_json)
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+# --- 2. CHARGEMENT & NETTOYAGE DE L'HISTORIQUE ---
+anciens_liens = {}
+if os.path.exists(filename):
     try:
-        with open(JSON_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return set(item["url"] for item in data), data
-    except Exception:
-        return set(), []
-
-def save_links_to_json(new_links, existing_data):
-    # Insère les nouveautés en haut de la liste
-    for link in reversed(new_links):
-        existing_data.insert(0, {
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "url": link
-        })
-    try:
-        with open(JSON_FILE, "w", encoding="utf-8") as f:
-            json.dump(existing_data, f, indent=4, ensure_ascii=False)
-        print(f"[JSON] {len(new_links)} nouveau(x) lien(s) sauvegardé(s).")
+        with open(filename, mode="r", encoding="utf-8") as json_file:
+            data_chargee = json.load(json_file)
+            if isinstance(data_chargee, list):
+                for item in data_chargee:
+                    if "lienurl" in item:
+                        try:
+                            date_objet = datetime.strptime(item.get("date", ""), "%d/%m/%Y")
+                            if date_objet >= limite_conservation:
+                                anciens_liens[item["lienurl"]] = item
+                        except:
+                            anciens_liens[item["lienurl"]] = item
     except Exception as e:
-        print(f"Erreur d'écriture JSON : {e}")
+        print(f"[Attention] Impossible de lire l'historique JSON : {e}")
 
-def send_discord_notification(link):
-    if not DISCORD_WEBHOOK_URL:
-        return
-    payload = {"content": f"🚨 **Nouveau lien Coin Master (d10xl) !** 🚨\n👉 {link}"}
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-    except Exception:
-        pass
+scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
 
-def extraire_liens():
-    links_found = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
+try:
+    response = scraper.get(url, timeout=15)
+    status_code = response.status_code
+    html_text = response.text
+except Exception as e:
+    status_code = 500
+    html_text = ""
+    print(f"[Erreur] Connexion impossible : {e}")
+
+if status_code == 200:
+    soup = BeautifulSoup(html_text, "html.parser")
+    json_data = []
+    liens_visites_session = set()
+    nouveaux_liens_detectes = 0  
+    
+    entry_content = soup.find(class_="entry-content")
+    if not entry_content:
+        entry_content = soup
+        
+    current_date_str = now.strftime("%d/%m/%Y")
+    
+    for element in entry_content.find_all(["p", "ul", "ol", "strong"]):
+        text = element.get_text().strip().lower()
+        
+        match_date = re.search(r'(\d{1,2})\s+([a-z]+)\s+(\d{4})', text)
+        if match_date:
+            jour = match_date.group(1).zfill(2)
+            nom_mois = match_date.group(2).strip()
+            annee = match_date.group(3)
+            
+            num_mois = mois_en_to_num.get(nom_mois, "01")
+            current_date_str = f"{jour}/{num_mois}/{annee}"
+            continue  
+
+       # 🟢 AJOUT : On vérifie si la date de la section actuelle est trop vieille (inférieure à limite_conservation)
         try:
-            page.goto(SEARCH_URL, wait_until="networkidle")
-            page.wait_for_timeout(2000)
+            date_section = datetime.strptime(current_date_str, "%d/%m/%Y")
+            # Si la date lue sur le site est plus vieille que notre limite, on ignore tous ses liens
+            if date_section < limite_conservation:
+                continue
+        except:
+            pass
+        
+        links = element.find_all("a", href=True)
+        for link in links:
+            href = link["href"].strip()
             
-            # Gestion de la popup de consentement de cookies Google si présente
-            try:
-                if page.locator("button:has-text('Tout accepter')").is_visible():
-                    page.click("button:has-text('Tout accepter')")
-                    page.wait_for_timeout(1000)
-            except Exception:
-                pass
-
-            # Récupération du texte brut de la page pour scanner les motifs textuels
-            page_text = page.locator("body").inner_text()
-            
-            # Recherche de tous les formats d'URLs contenant 'd10xl'
-            urls = re.findall(r'https://[^\s"\'>]*d10xl[^\s"\'>]*', page_text, re.IGNORECASE)
-            
-            for u in urls:
-                # Nettoyage des ponctuations de fin de chaîne attrapées par la regex
-                u_clean = u.rstrip(".,;:!? )]*")
-                if u_clean not in links_found:
-                    links_found.append(u_clean)
+            if href.startswith("/") or "t.me" in href.lower() or "telegram.me" in href.lower():
+                continue
+            if any(p in href.lower() for p in ["twitter.com", "facebook.com", "whatsapp", "pinterest", "reddit.com"]):
+                continue
+                
+            keywords = ["coinmaster", "static-mat", "t.co", "bit.ly", "moonactive", "d10xl"]
+            if any(key in href.lower() for key in keywords):
+                
+                if href in liens_visites_session:
+                    continue
+                liens_visites_session.add(href)
+                
+                type_recompense = "Spins et Coins"
+                
+                if href in anciens_liens:
+                    date_premier_scraping_str = anciens_liens[href].get("date_scraping", date_now_str)
+                    badge_actuel = ""
                     
-        except Exception as e:
-            print(f"Erreur lors du scraping : {e}")
-        finally:
-            browser.close()
-    return links_found
+                    try:
+                        date_premier_scraping = datetime.strptime(date_premier_scraping_str, "%d/%m/%Y @ %H:%M")
+                        if now - date_premier_scraping < timedelta(hours=6):
+                            badge_actuel = "NEW"
+                    except:
+                        badge_actuel = anciens_liens[href].get("badge", "")
 
-if __name__ == "__main__":
-    print("Vérification des liens officiels Coin Master contenant d10xl...")
-    cached_urls, full_data = load_cached_links()
-    liens_scrapes = extraire_liens()
-    
-    nouveaux_liens = [l for l in liens_scrapes if l not in cached_urls]
-    
-    if nouveaux_liens:
-        save_links_to_json(nouveaux_liens, full_data)
-        for un_lien in nouveaux_liens:
-            send_discord_notification(un_lien)
-    else:
-        print("Aucun nouveau lien contenant d10xl détecté.")
+                    json_data.append({
+                        "date_scraping": date_premier_scraping_str, 
+                        "date_scraping1": anciens_liens[href].get("date_scraping1", f"{current_date_str} @ {heure_actuelle_str}"),
+                        "date": current_date_str,  
+                        "heure": anciens_liens[href].get("heure", "00:00"),
+                        "recompense": anciens_liens[href].get("recompense", type_recompense), 
+                        "lienurl": href,
+                        "badge": badge_actuel
+                    })
+                else:
+                    # Ici, plus aucun blocage de date. Si le lien n'est pas dans le JSON, c'est un NOUVEAU !
+                    nouveaux_liens_detectes += 1
+                    date_scraping1_combinee = f"{current_date_str} @ {heure_actuelle_str}"
+                    json_data.append({
+                        "date_scraping": date_now_str, 
+                        "date_scraping1": date_scraping1_combinee,
+                        "date": current_date_str,  
+                        "heure": heure_actuelle_str,
+                        "recompense": type_recompense, 
+                        "lienurl": href,
+                        "badge": "NEW" 
+                    })
+
+    if not json_data and anciens_liens:
+        json_data = list(anciens_liens.values())
+
+    def extraire_cle_parution(item):
+        try:
+            return datetime.strptime(item.get("date", ""), "%d/%m/%Y").timestamp()
+        except:
+            return 0
+
+    json_data.sort(key=extraire_cle_parution, reverse=True)
+
+    with open(filename, mode="w", encoding="utf-8") as json_file:
+        json.dump(json_data, json_file, indent=4, ensure_ascii=False)
+        
+    print(f"[Terminé] Fichier Coin Master {filename} mis à jour ({len(json_data)} liens valides).")
+    print(f"[Diagnostic] Nombre de nouveaux liens détectés : {nouveaux_liens_detectes}")
+
+    # --- 7. EXPORTATION NOTIFICATION & ENVOI PUSH DIRECT ---
+#    if nouveaux_liens_detectes > 0:
+ #       try:
+ #           from firebase_admin import messaging
+ #           
+#            db.collection("notifications").add({
+#                "title": "🐷 Coin Reward ! 🎁",
+#                "body": "New free spins have just been added !",
+#                "nom_du_jeu": "coin_master",
+#                "created_at": firestore.SERVER_TIMESTAMP
+#            })
+  #          print("[Firebase] Enregistrement d'historique créé pour Coin Master.")
+#
+#            message = messaging.Message(
+#                notification=messaging.Notification(
+#                    title="🐷 Coin Reward ! 🎁",
+#                    body="New free spins have just been added !"
+#                ),
+#                topic="coin_master"
+#            )
+#            
+#            response = messaging.send(message)
+#            print(f"[Firebase Push] Notification Coin Master propulsée avec succès ! (ID: {response})")
+#            
+#        except Exception as e:
+#            print(f"[Firebase] [Erreur] Impossible d'envoyer l'alerte push direct Coin Master : {e}")
+#            
+else:
+    print(f"[Erreur] Échec d'accès réseau (Code {status_code}).")
