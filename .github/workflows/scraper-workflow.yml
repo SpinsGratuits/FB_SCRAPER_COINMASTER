@@ -2,7 +2,7 @@ name: Script de Scraping Périodique
 
 on:
   schedule:
-    # Exécution toutes les 4 heures (00h, 04h, 08h, 12h, 16h, 20h UTC)
+    # Exécution à la 7e minute de chaque heure sélectionnée
     - cron: '7 0,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21 * * *'
   workflow_dispatch:
 
@@ -22,12 +22,9 @@ jobs:
     - name: Installer les librairies
       run: |
         python -m pip install --upgrade pip
-        pip install beautifulsoup4 cloudscraper firebase-admin
+        pip install beautifulsoup4 cloudscraper
 
     - name: Lancer le scraper
-      env:
-        # Injection sécurisée de votre clé Firebase dans la machine GitHub
-        FIREBASE_KEY: ${{ secrets.FIREBASE_KEY }}
       run: python scraper.py
 
     - name: Sauvegarder les modifications dans le dépôt
