@@ -6,14 +6,19 @@ import cloudscraper
 from bs4 import BeautifulSoup
 
 # --- 1. CONFIGURATION ---
-# Utilisation d'une passerelle de scraping Facebook vers JSON résiliente
-url = "https://rsshub.app"
 filename = "scrapcoinmaster.json"
 
 now = datetime.now()
 date_now_str = now.strftime("%d/%m/%Y @ %H:%M")
 heure_actuelle_str = now.strftime("%H:%M")
 limite_conservation = now - timedelta(days=5)
+
+# Liste d'instances RSSHub de secours pour éviter les blocages de l'instance principale
+urls_miroirs = [
+    "https://rssforever.com",
+    "https://rsshub.app",
+    "https://edu.xyz"
+]
 
 # --- 2. CHARGEMENT & NETTOYAGE DE L'HISTORIQUE LOCAL ---
 anciens_liens = {}
@@ -33,20 +38,36 @@ if os.path.exists(filename):
     except Exception as e:
         print(f"[Attention] Impossible de lire l'historique JSON : {e}")
 
-# --- 3. REQUÊTE RÉSEAU ---
+# --- 3. REQUÊTE RÉSEAU AVEC ROTATION ---
 scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
 
-try:
-    response = scraper.get(url, timeout=15)
-    status_code = response.status_code
-    posts_data = response.json() if status_code == 200 else {}
-except Exception as e:
-    status_code = 500
-    posts_data = {}
-    print(f"[Erreur] Connexion impossible à la passerelle Facebook : {e}")
+posts_data = {}
+status_code = 0
+instance_fonctionnelle = None
+
+print("[Réseau] Tentative de connexion aux instances de secours...")
+for url in urls_miroirs:
+    try:
+        print(f"[Réseau] Test de l'URL : {url}")
+        response = scraper.get(url, timeout=12)
+        status_code = response.status_code
+        
+        if status_code == 200:
+            posts_data = response.json()
+            # Si l'instance renvoie un JSON valide mais vide (Facebook refuse l'accès), on continue
+            if posts_data.get("items"):
+                instance_fonctionnelle = url
+                print(f"[Succès] Données récupérées via : {url}")
+                break
+            else:
+                print("[Info] L'instance a répondu mais la liste des posts Facebook est vide.")
+        else:
+            print(f"[Attention] L'instance a renvoyé un code erreur HTTP : {status_code}")
+    except Exception as e:
+        print(f"[Erreur] Impossible de joindre cette instance : {e}")
 
 # --- 4. PARSING DES POSTS FACEBOOK ---
-if status_code == 200 and "items" in posts_data:
+if instance_fonctionnelle and "items" in posts_data:
     json_data = []
     liens_visites_session = set()
     nouveaux_liens_detectes = 0  
@@ -143,7 +164,8 @@ if status_code == 200 and "items" in posts_data:
         json.dump(json_data, json_file, indent=4, ensure_ascii=False)
         
     print(f"[Terminé] Fichier Coin Master FB {filename} mis à jour ({len(json_data)} liens valides).")
-    print(f"[Mode Test] Aucun envoi Firebase effectué. Nouveaux liens simulés : {nouveaux_liens_detectes}")
+    print(f"[Mode Test] Nouveaux liens détectés lors de la session : {nouveaux_liens_detectes}")
             
 else:
-    print(f"[Erreur] Échec d'accès réseau ou format JSON Facebook invalide (Code {status_code}).")
+    print("\n[⚠️ ALERTE ÉCHEC] Aucune instance RSSHub n'a réussi à extraire les publications Facebook.")
+    print("[Raison] Facebook bloque agressivement les requêtes anonymes en provenance des serveurs cloud.")
