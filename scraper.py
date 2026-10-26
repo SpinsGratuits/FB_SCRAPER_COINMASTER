@@ -2,10 +2,10 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-import cloudscraper
+#import cloudscraper
 from bs4 import BeautifulSoup
-import firebase_admin
-from firebase_admin import credentials, firestore
+#import firebase_admin
+#from firebase_admin import credentials, firestore
 
 # --- 1. CONFIGURATION ---
 url = "https://facebook.com/coinmaster/"
