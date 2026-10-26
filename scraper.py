@@ -23,16 +23,16 @@ heure_actuelle_str = now.strftime("%H:%M")
 limite_conservation = now - timedelta(days=5)
 
 # --- 1B. INITIALISATION FIREBASE ---
-firebase_key_raw = os.environ.get('FIREBASE_KEY')
-if not firebase_key_raw:
-    raise ValueError("Le secret FIREBASE_KEY est introuvable dans l'environnement.")
+#firebase_key_raw = os.environ.get('FIREBASE_KEY')
+#if not firebase_key_raw:
+#    raise ValueError("Le secret FIREBASE_KEY est introuvable dans l'environnement.")
 
-if not firebase_admin._apps:
-    cred_json = json.loads(firebase_key_raw)
-    cred = credentials.Certificate(cred_json)
-    firebase_admin.initialize_app(cred)
+#if not firebase_admin._apps:
+#    cred_json = json.loads(firebase_key_raw)
+#    cred = credentials.Certificate(cred_json)
+#    firebase_admin.initialize_app(cred)
 
-db = firestore.client()
+# db = firestore.client()
 
 # --- 2. CHARGEMENT & NETTOYAGE DE L'HISTORIQUE ---
 anciens_liens = {}
